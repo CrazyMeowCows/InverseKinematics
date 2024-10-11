@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<title>IK Testing</title>
+</head>
+
+<body>
+<canvas id="canvas" width="0" height="0"></canvas>    
+</body>
+</html>
+    
+<script>   
+src="https://code.jquery.com/jquery-2.1.0.js"
+//Canvas Setup and sizing ---------------------------------------------------------------------------------------------
+var canvas = document.getElementById('canvas'),
+ctx = canvas.getContext("2d", { willReadFrequently: true });  
+    
+canvas.width = 650;
+canvas.height = 650;
+    
+
+//Constants -----------------------------------------------------------------------------------------------------------
+    
+const w = canvas.width;
+const h = canvas.height;
+const GRID_WIDTH = w/10;
+        
+const ERROR_TOLERANCE = 0.1;
+const SIMULATION_STEP = 0.0000063;
+const MAXIMUM_INC = 1000;
+    
+const Z_AXIS = new Vector3(0, 0, 1);
+const ORIGIN = new Linkage(0, null, 0, 0, new Vector2(0, 0), null)
+
+const LINKAGE_AMOUNT = 2;
+const TOTAL_LENGTH = 280;
+
+    
+//Variable Definitions ------------------------------------------------------------------------------------------------
+      
+var kinematic_chain = new Array(LINKAGE_AMOUNT);
+    
+kinematic_chain[0] = new Linkage(TOTAL_LENGTH/LINKAGE_AMOUNT, Z_AXIS, 0, 0, new Vector2(TOTAL_LENGTH/LINKAGE_AMOUNT, 0), ORIGIN);
+for (let i = 1; i < LINKAGE_AMOUNT; i++) {
+    kinematic_chain[i] = new Linkage(
+        TOTAL_LENGTH/LINKAGE_AMOUNT, 
+        Z_AXIS, 
+        0, 
+        0, 
+        new Vector2(
+            kinematic_chain[i-1].endpoint.x + TOTAL_LENGTH/LINKAGE_AMOUNT,
+            kinematic_chain[i-1].endpoint.y + TOTAL_LENGTH/LINKAGE_AMOUNT
+        ), 
+        kinematic_chain[i-1]
+    );
+}
+    
+var targetPosition = new Vector2(TOTAL_LENGTH + 10, 0);
+    
+var prevTime = new Date();
+
+    
+//Utilities -----------------------------------------------------------------------------------------------------------
+    
+//Easy Circle Drawing
+function circle(x, y, r, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI*2, false);
+    ctx.fill();
+}
+
+//Easy Line Drawing
+function line(x, y, x2, y2, color, width) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+}
+   
+//Return distance between two points
+function getDist(v1, v2) {
+    return Math.hypot(v2.x-v1.x, v2.y-v1.y);
+}
+
+
+// Structs ------------------------------------------------------------------------------------------------------------
+    
+function Linkage (length, rotationalAxis, jointAngle, totalAngle, endpoint, parentJoint) {
+    this.length = length;
+    this.rotationalAxis = rotationalAxis;
+    this.jointAngle = jointAngle;
+    this.totalAngle = totalAngle;
+    this.endpoint = endpoint;
+    this.parentJoint = parentJoint;
+}    
+    
+function Vector2 (x, y) {
+    this.x = x;
+    this.y = y;
+}
+    
+function Vector3 (x, y, z) {
+    this.x = x;
+    this.y = y;
+    this.z = z;
+}
+    
+function Matrix () {
+    this.columns = [];
+}
+    
+
+// Vector/Matrix Functions --------------------------------------------------------------------------------------------
+    
+function crossProduct (v1, v2) {
+    return [
+        (v1.y*v2.z - v1.z*v2.y),
+        -(v1.x*v2.z - v1.z*v2.x),
+        (v1.x*v2.y - v1.y*v2.x)
+    ];
+} 
+    
+function dotProduct (v1, v2) {
+    return v1.x*v2.x + v1.y*v2.y + v1.z*v2.z;
+}
+    
+function normalizeToLength (v1, len) {
+    let magnitude = getDist(new Vector2(0,0), v1);
+    v1.x *= 1/magnitude*len;
+    v1.y *= 1/magnitude*len;
+    return v1;
+}
+    
+function addVector2 (v1, v2) {
+    return new Vector2(v1.x + v2.x, v1.y + v2.y);
+}
+    
+function subtractVector2 (v1, v2) {
+    return new Vector2(v1.x - v2.x, v1.y - v2.y);
+}
+    
+function matrixVectorMult (matrix, vector3) {
+    let result = [];
+    for (let i = 0; i < matrix.columns[0].length; i++) {
+        result.push(dotProduct(new Vector3(matrix.columns[0][i], matrix.columns[1][i], matrix.columns[2][i]), vector3))
+    }
+    return result;
+}
+    
+function transpose (m) {
+    let t = new Matrix();
+    let matrixWidth = m.columns.length;
+    let matrixHeight = m.columns[0].length;
+    
+    for (let y = 0; y < matrixHeight; y++) {
+        let tColumn = [];
+        for (let x = 0; x < matrixWidth; x++) {
+            tColumn.push(m.columns[x][y]);
+        }
+        t.columns.push(tColumn);
+    }
+    
+    return t;
+}
+
+    
+// Logic Functions ----------------------------------------------------------------------------------------------------
+    
+function GetJacobianTranspose() {
+    let jacobian = new Matrix();
+    let kinematic_chainEndpoint = kinematic_chain[LINKAGE_AMOUNT-1].endpoint;
+    
+    kinematic_chain.forEach(linkage => {
+        jacobian.columns.push(
+            crossProduct(
+                linkage.rotationalAxis, 
+                new Vector3(kinematic_chainEndpoint.x - linkage.parentJoint.endpoint.x, kinematic_chainEndpoint.y - linkage.parentJoint.endpoint.y, 0)
+            )
+        )
+    });
+    
+    return transpose(jacobian);
+}
+
+function GetDeltaOrientation() {
+    let JacobianTransposed = GetJacobianTranspose();
+    
+    let kinematic_chainEndpoint = kinematic_chain[kinematic_chain.length-1].endpoint
+    let errorVector = new Vector3(targetPosition.x - kinematic_chainEndpoint.x, targetPosition.y - kinematic_chainEndpoint.y, 0);
+    
+    let poseDelta = matrixVectorMult(JacobianTransposed, errorVector);
+    
+    return poseDelta;
+}
+    
+function logic () {
+    let inc = 0;
+    
+    //Interate arm position until the error is within tolerance or the maximum amount of increments is exceeded (aka targeting an unreachable pose)
+    while(getDist(kinematic_chain[kinematic_chain.length-1].endpoint, targetPosition) > ERROR_TOLERANCE && inc < MAXIMUM_INC) {
+        
+        let poseDelta = GetDeltaOrientation();
+
+        for (let i = 0; i < kinematic_chain.length; i++) {
+            let linkage = kinematic_chain[i];
+            
+            linkage.endpoint.x = linkage.parentJoint.endpoint.x + Math.cos(linkage.jointAngle + linkage.parentJoint.totalAngle)*linkage.length;
+            linkage.endpoint.y = linkage.parentJoint.endpoint.y + Math.sin(linkage.jointAngle + linkage.parentJoint.totalAngle)*linkage.length;
+
+            linkage.totalAngle = linkage.jointAngle + linkage.parentJoint.totalAngle;
+            
+            linkage.jointAngle += poseDelta[i]*SIMULATION_STEP;
+        }
+        inc++;
+    }
+}
+    
+
+// Drawing Functions --------------------------------------------------------------------------------------------------
+    
+function draw () {
+    //Draw background
+    ctx.fillStyle = "black"; 
+    ctx.fillRect(0, 0, w, h);
+    
+    line(w/2, 0, w/2, h, "gray", 3);
+    line(0, h/2, w, h/2, "gray", 3);
+    
+    ctx.font = "15px Courier New";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "gray";
+    for (let x = GRID_WIDTH; x < w; x += GRID_WIDTH) {
+        line(x, 0, x, h, "gray", 1);
+        ctx.fillText("" + x-w/2, x+5, h/2 + 18);
+    }
+    for (let y = GRID_WIDTH; y < h; y += GRID_WIDTH) {
+        line(0, y, w, y, "gray", 1);
+        ctx.fillText("" + h/2-y, w/2+5, y+18);
+    }
+    
+    ctx.font = "Bold 25px Courier New";
+    ctx.textAlign = "left";  
+    
+    ctx.fillStyle = "gray"; 
+    ctx.fillText("+X", w-40, h/2 - 15);
+    ctx.fillText("+Y", w/2+10, 25);
+    
+    //Draw Target Position
+    ctx.fillStyle = "white";
+    ctx.fillText("X: " + Math.round(targetPosition.x), 10, 20);
+    ctx.fillText("Y: " + Math.round(targetPosition.y), 10, 40);
+    
+    //Calculate and display FPS
+    let currentTime = new Date();
+    ctx.fillText("FPS: " + Math.round(10000/(currentTime - prevTime))/10, 10, h-15);
+    prevTime = currentTime;
+    
+    //Draw Origin
+    circle(w/2 + ORIGIN.endpoint.x, h/2 - ORIGIN.endpoint.y, 10, "white");
+    
+    //Draw Linkage kinematic_chain
+    kinematic_chain.forEach(linkage => {
+        line(w/2 + linkage.parentJoint.endpoint.x, h/2 - linkage.parentJoint.endpoint.y, w/2 + linkage.endpoint.x, h/2 - linkage.endpoint.y, "white", 3);
+        circle(w/2 + linkage.endpoint.x, h/2 - linkage.endpoint.y, 10, "white");
+    });
+
+    //Draw Target Position
+    circle(targetPosition.x + w/2, h/2 - targetPosition.y, 10, "green");
+}
+
+    
+//Mouse input ---------------------------------------------------------------------------------------------------------
+    
+canvas.onmousemove = (function (event) {
+    let mousePos = new Vector2(event.pageX-8 - w/2, h/2 - event.pageY+8);
+    let mouseDeltaFromOrigin = subtractVector2(mousePos, ORIGIN.endpoint);
+    
+    if (getDist(ORIGIN.endpoint, mousePos) > TOTAL_LENGTH) {
+        mousePos = addVector2(normalizeToLength(mouseDeltaFromOrigin, TOTAL_LENGTH + ERROR_TOLERANCE), ORIGIN.endpoint);
+    }
+    
+    targetPosition = mousePos;
+});
+
+    
+// Main Loop ----------------------------------------------------------------------------------------------------------
+ 
+function loop() {
+    setTimeout(() => {
+        logic();
+        draw();
+        loop();
+    }, 0);
+}
+loop();
+    
+</script>
